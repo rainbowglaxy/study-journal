@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from './supabaseClient';
 
 const DEFAULT_SUBJECTS = ["数学", "语文", "英语", "物理", "化学", "历史", "编程", "其他"];
 const MOODS = [
@@ -277,50 +278,258 @@ export default function StudyJournal() {
   const [lightboxImg, setLightboxImg] = useState(null);
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [loading, setLoading] = useState(true);
 
   const blankForm = () => ({ date: getTodayStr(), subject: subjects[0] || "其他", mood: 1, duration: "", title: "", content: "", goals: "", photos: [] });
   const [form, setForm] = useState(blankForm());
   const fileInputRef = useRef();
 
+  // 从Supabase加载数据
   useEffect(() => {
-    try {
-      const r = localStorage.getItem("study_records");
-      if (r) setRecords(JSON.parse(r));
-      const s = localStorage.getItem("study_subjects");
-      if (s) setSubjects(JSON.parse(s));
-    } catch (e) { console.error(e); }
+    loadData();
   }, []);
 
-  const saveRecords = async (list) => {
-    setSaving(true);
-    try { localStorage.setItem("study_records", JSON.stringify(list)); setSaveSuccess(true); setTimeout(() => setSaveSuccess(false), 1500); } catch (e) { console.error(e); }
-    setSaving(false);
+  const loadData = async () => {
+    try {
+      setLoading(true);
+
+      // 加载学习记录
+      const { data: recordsData, error: recordsError } = await supabase
+        .from('study_records')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (recordsError) {
+        console.error('加载记录失败:', recordsError);
+      } else {
+        // 加载每个记录的照片
+        const recordsWithPhotos = await Promise.all(
+          recordsData.map(async (record) => {
+            const { data: photosData, error: photosError } = await supabase
+              .from('record_photos')
+              .select('*')
+              .eq('record_id', record.id);
+
+            if (photosError) {
+              console.error('加载照片失败:', photosError);
+              return { ...record, photos: [] };
+            }
+
+            return { ...record, photos: photosData || [] };
+          })
+        );
+        setRecords(recordsWithPhotos);
+      }
+
+      // 加载自定义科目
+      const { data: subjectsData, error: subjectsError } = await supabase
+        .from('custom_subjects')
+        .select('name')
+        .order('created_at', { ascending: true });
+
+      if (subjectsError) {
+        console.error('加载科目失败:', subjectsError);
+      } else {
+        const customSubjects = subjectsData.map(s => s.name);
+        const allSubjects = [...DEFAULT_SUBJECTS.filter(s => s !== "其他"), ...customSubjects, "其他"];
+        setSubjects(allSubjects);
+      }
+
+    } catch (error) {
+      console.error('加载数据失败:', error);
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const saveSubjects = async (list) => { try { localStorage.setItem("study_subjects", JSON.stringify(list)); } catch (e) { console.error(e); } };
+  // 上传照片到Supabase Storage
+  const uploadPhotoToStorage = async (file) => {
+    const fileExt = file.name.split('.').pop();
+    const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
+    const filePath = `photos/${fileName}`;
 
-  const handleAddSubject = s => { const next = [...subjects.filter(x => x !== "其他"), s, "其他"]; setSubjects(next); saveSubjects(next); };
-  const handleDeleteSubject = s => { const next = subjects.filter(x => x !== s); setSubjects(next); saveSubjects(next); };
+    const { error: uploadError } = await supabase.storage
+      .from('study-photos')
+      .upload(filePath, file);
 
-  const handlePhotoUpload = e => {
-    Array.from(e.target.files).forEach(file => {
-      const r = new FileReader();
-      r.onload = ev => setForm(f => ({ ...f, photos: [...f.photos, { url: ev.target.result, name: file.name }] }));
-      r.readAsDataURL(file);
-    });
+    if (uploadError) {
+      throw uploadError;
+    }
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('study-photos')
+      .getPublicUrl(filePath);
+
+    return { url: publicUrl, name: file.name };
+  };
+
+  const handlePhotoUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    const uploadedPhotos = [];
+
+    for (const file of files) {
+      try {
+        const photo = await uploadPhotoToStorage(file);
+        uploadedPhotos.push(photo);
+      } catch (error) {
+        console.error('上传照片失败:', error);
+        alert(`上传照片 ${file.name} 失败`);
+      }
+    }
+
+    if (uploadedPhotos.length > 0) {
+      setForm(f => ({ ...f, photos: [...f.photos, ...uploadedPhotos] }));
+    }
   };
 
   const handleSubmit = async () => {
     if (!form.title.trim() || !form.content.trim()) return;
-    const next = [{ ...form, id: Date.now() }, ...records];
-    setRecords(next); await saveRecords(next);
-    setForm({ ...blankForm(), subject: form.subject });
-    setView("home");
+
+    setSaving(true);
+    try {
+      // 插入学习记录
+      const { data: recordData, error: recordError } = await supabase
+        .from('study_records')
+        .insert([{
+          date: form.date,
+          subject: form.subject,
+          mood: form.mood,
+          duration: form.duration ? parseFloat(form.duration) : null,
+          title: form.title,
+          content: form.content,
+          goals: form.goals || null,
+        }])
+        .select()
+        .single();
+
+      if (recordError) {
+        throw recordError;
+      }
+
+      // 插入照片记录
+      if (form.photos.length > 0) {
+        const photoRecords = form.photos.map(photo => ({
+          record_id: recordData.id,
+          url: photo.url,
+          name: photo.name,
+        }));
+
+        const { error: photosError } = await supabase
+          .from('record_photos')
+          .insert(photoRecords);
+
+        if (photosError) {
+          throw photosError;
+        }
+      }
+
+      // 重新加载数据
+      await loadData();
+
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 1500);
+      setForm({ ...blankForm(), subject: form.subject });
+      setView("home");
+
+    } catch (error) {
+      console.error('保存记录失败:', error);
+      alert('保存记录失败，请重试');
+    } finally {
+      setSaving(false);
+    }
   };
 
-  const deleteRecord = async id => {
-    const next = records.filter(r => r.id !== id);
-    setRecords(next); await saveRecords(next); setView("list");
+  const deleteRecord = async (id) => {
+    try {
+      // 删除照片记录
+      const { error: photosError } = await supabase
+        .from('record_photos')
+        .delete()
+        .eq('record_id', id);
+
+      if (photosError) {
+        throw photosError;
+      }
+
+      // 删除学习记录
+      const { error: recordError } = await supabase
+        .from('study_records')
+        .delete()
+        .eq('id', id);
+
+      if (recordError) {
+        throw recordError;
+      }
+
+      // 重新加载数据
+      await loadData();
+      setView("list");
+
+    } catch (error) {
+      console.error('删除记录失败:', error);
+      alert('删除记录失败，请重试');
+    }
+  };
+
+  const handleAddSubject = async (subjectName) => {
+    try {
+      const { error } = await supabase
+        .from('custom_subjects')
+        .insert([{ name: subjectName }]);
+
+      if (error) {
+        throw error;
+      }
+
+      // 重新加载科目
+      const { data: subjectsData, error: subjectsError } = await supabase
+        .from('custom_subjects')
+        .select('name')
+        .order('created_at', { ascending: true });
+
+      if (subjectsError) {
+        throw subjectsError;
+      }
+
+      const customSubjects = subjectsData.map(s => s.name);
+      const allSubjects = [...DEFAULT_SUBJECTS.filter(s => s !== "其他"), ...customSubjects, "其他"];
+      setSubjects(allSubjects);
+
+    } catch (error) {
+      console.error('添加科目失败:', error);
+      alert('添加科目失败，请重试');
+    }
+  };
+
+  const handleDeleteSubject = async (subjectName) => {
+    try {
+      const { error } = await supabase
+        .from('custom_subjects')
+        .delete()
+        .eq('name', subjectName);
+
+      if (error) {
+        throw error;
+      }
+
+      // 重新加载科目
+      const { data: subjectsData, error: subjectsError } = await supabase
+        .from('custom_subjects')
+        .select('name')
+        .order('created_at', { ascending: true });
+
+      if (subjectsError) {
+        throw subjectsError;
+      }
+
+      const customSubjects = subjectsData.map(s => s.name);
+      const allSubjects = [...DEFAULT_SUBJECTS.filter(s => s !== "其他"), ...customSubjects, "其他"];
+      setSubjects(allSubjects);
+
+    } catch (error) {
+      console.error('删除科目失败:', error);
+      alert('删除科目失败，请重试');
+    }
   };
 
   const goDetail = (r, from) => { setSelectedRecord(r); setPrevView(from); setView("detail"); };
@@ -332,6 +541,17 @@ export default function StudyJournal() {
     for (const d of dates) { if (Math.round((cur - new Date(d)) / 86400000) <= 1) { n++; cur = new Date(d); } else break; }
     return n;
   })();
+
+  if (loading) {
+    return (
+      <div style={{ minHeight: "100vh", background: S.bg, color: "#fffffe", fontFamily: S.serif, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: 36, marginBottom: 16 }}>📓</div>
+          <div>加载中...</div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div style={{ minHeight: "100vh", background: S.bg, color: "#fffffe", fontFamily: S.serif }}>
