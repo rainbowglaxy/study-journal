@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { supabase } from './supabaseClient';
+import Auth from './components/Auth';
 
 const DEFAULT_SUBJECTS = ["数学", "语文", "英语", "物理", "化学", "历史", "编程", "其他"];
 const MOODS = [
@@ -270,6 +271,7 @@ function SearchView({ records, subjects, onSelectRecord, onBack }) {
 
 // ── Main App ───────────────────────────────────────────────────────────────
 export default function StudyJournal() {
+  const [user, setUser] = useState(null);
   const [view, setView] = useState("home");
   const [records, setRecords] = useState([]);
   const [subjects, setSubjects] = useState(DEFAULT_SUBJECTS);
@@ -284,19 +286,40 @@ export default function StudyJournal() {
   const [form, setForm] = useState(blankForm());
   const fileInputRef = useRef();
 
-  // 从Supabase加载数据
+  // 检查用户登录状态
   useEffect(() => {
-    loadData();
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadData();
+      } else {
+        setLoading(false);
+      }
+    });
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      if (session?.user) {
+        loadData();
+      } else {
+        setRecords([]);
+        setSubjects(DEFAULT_SUBJECTS);
+        setLoading(false);
+      }
+    });
+
+    return () => subscription.unsubscribe();
   }, []);
 
   const loadData = async () => {
     try {
       setLoading(true);
 
-      // 加载学习记录
+      // 加载学习记录（只加载当前用户的记录）
       const { data: recordsData, error: recordsError } = await supabase
         .from('study_records')
         .select('*')
+        .eq('user_id', user?.id)
         .order('created_at', { ascending: false });
 
       if (recordsError) {
@@ -321,10 +344,11 @@ export default function StudyJournal() {
         setRecords(recordsWithPhotos);
       }
 
-      // 加载自定义科目
+      // 加载自定义科目（只加载当前用户的科目）
       const { data: subjectsData, error: subjectsError } = await supabase
         .from('custom_subjects')
         .select('name')
+        .eq('user_id', user?.id)
         .order('created_at', { ascending: true });
 
       if (subjectsError) {
@@ -342,11 +366,11 @@ export default function StudyJournal() {
     }
   };
 
-  // 上传照片到Supabase Storage
+  // 上传照片到Supabase Storage（包含用户ID）
   const uploadPhotoToStorage = async (file) => {
     const fileExt = file.name.split('.').pop();
     const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`;
-    const filePath = `photos/${fileName}`;
+    const filePath = `photos/${user?.id}/${fileName}`;
 
     const { error: uploadError } = await supabase.storage
       .from('study-photos')
@@ -387,10 +411,11 @@ export default function StudyJournal() {
 
     setSaving(true);
     try {
-      // 插入学习记录
+      // 插入学习记录（包含user_id）
       const { data: recordData, error: recordError } = await supabase
         .from('study_records')
         .insert([{
+          user_id: user?.id,
           date: form.date,
           subject: form.subject,
           mood: form.mood,
@@ -455,7 +480,8 @@ export default function StudyJournal() {
       const { error: recordError } = await supabase
         .from('study_records')
         .delete()
-        .eq('id', id);
+        .eq('id', id)
+        .eq('user_id', user?.id);
 
       if (recordError) {
         throw recordError;
@@ -475,7 +501,7 @@ export default function StudyJournal() {
     try {
       const { error } = await supabase
         .from('custom_subjects')
-        .insert([{ name: subjectName }]);
+        .insert([{ name: subjectName, user_id: user?.id }]);
 
       if (error) {
         throw error;
@@ -485,6 +511,7 @@ export default function StudyJournal() {
       const { data: subjectsData, error: subjectsError } = await supabase
         .from('custom_subjects')
         .select('name')
+        .eq('user_id', user?.id)
         .order('created_at', { ascending: true });
 
       if (subjectsError) {
@@ -506,7 +533,8 @@ export default function StudyJournal() {
       const { error } = await supabase
         .from('custom_subjects')
         .delete()
-        .eq('name', subjectName);
+        .eq('name', subjectName)
+        .eq('user_id', user?.id);
 
       if (error) {
         throw error;
@@ -516,6 +544,7 @@ export default function StudyJournal() {
       const { data: subjectsData, error: subjectsError } = await supabase
         .from('custom_subjects')
         .select('name')
+        .eq('user_id', user?.id)
         .order('created_at', { ascending: true });
 
       if (subjectsError) {
@@ -532,6 +561,16 @@ export default function StudyJournal() {
     }
   };
 
+  // 登出功能
+  const handleLogout = async () => {
+    try {
+      const { error } = await supabase.auth.signOut();
+      if (error) throw error;
+    } catch (error) {
+      console.error('登出失败:', error);
+    }
+  };
+
   const goDetail = (r, from) => { setSelectedRecord(r); setPrevView(from); setView("detail"); };
 
   const totalHours = records.reduce((s, r) => s + (parseFloat(r.duration) || 0), 0);
@@ -541,6 +580,11 @@ export default function StudyJournal() {
     for (const d of dates) { if (Math.round((cur - new Date(d)) / 86400000) <= 1) { n++; cur = new Date(d); } else break; }
     return n;
   })();
+
+  // 如果未登录，显示登录页面
+  if (!user) {
+    return <Auth />;
+  }
 
   if (loading) {
     return (
@@ -595,6 +639,7 @@ export default function StudyJournal() {
         <button className="btn-ghost" onClick={() => setView("search")} style={{ fontSize: 13 }}>🔍 查询</button>
         <button className="btn-ghost" onClick={() => setView("list")} style={{ fontSize: 13 }}>📋 全部</button>
         <button className="btn-primary" onClick={() => { setForm({ ...blankForm(), subject: form.subject }); setView("new"); }}>+ 新建记录</button>
+        <button className="btn-ghost" onClick={handleLogout} style={{ fontSize: 13, marginLeft: 8 }}>退出</button>
       </div>
 
       <div style={{ maxWidth: 880, margin: "0 auto", padding: "32px 24px" }}>
