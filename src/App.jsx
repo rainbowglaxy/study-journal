@@ -289,18 +289,20 @@ export default function StudyJournal() {
   // 检查用户登录状态
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        loadData();
+      const currentUser = session?.user ?? null;
+      setUser(currentUser);
+      if (currentUser) {
+        loadData(currentUser.id);
       } else {
         setLoading(false);
       }
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUser(session?.user ?? null);
-      if (session?.user) {
-        loadData();
+      const currentUser = session?.user ?? null;
+      setUser(currentUser);
+      if (currentUser) {
+        loadData(currentUser.id);
       } else {
         setRecords([]);
         setSubjects(DEFAULT_SUBJECTS);
@@ -311,7 +313,7 @@ export default function StudyJournal() {
     return () => subscription.unsubscribe();
   }, []);
 
-  const loadData = async () => {
+  const loadData = async (userId) => {
     try {
       setLoading(true);
 
@@ -319,7 +321,7 @@ export default function StudyJournal() {
       const { data: recordsData, error: recordsError } = await supabase
         .from('study_records')
         .select('*')
-        .eq('user_id', user?.id)
+        .eq('user_id', userId)
         .order('created_at', { ascending: false });
 
       if (recordsError) {
@@ -348,7 +350,7 @@ export default function StudyJournal() {
       const { data: subjectsData, error: subjectsError } = await supabase
         .from('custom_subjects')
         .select('name')
-        .eq('user_id', user?.id)
+        .eq('user_id', userId)
         .order('created_at', { ascending: true });
 
       if (subjectsError) {
@@ -449,7 +451,7 @@ export default function StudyJournal() {
       }
 
       // 重新加载数据
-      await loadData();
+      await loadData(user?.id);
 
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 1500);
@@ -488,7 +490,7 @@ export default function StudyJournal() {
       }
 
       // 重新加载数据
-      await loadData();
+      await loadData(user?.id);
       setView("list");
 
     } catch (error) {
